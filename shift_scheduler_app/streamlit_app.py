@@ -79,12 +79,20 @@ def build_shift_set_fallback(T, min_len=4, max_len=8):
                 S.append((s,e))
     return S
 
-def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
+def adapt_to_user_optimizer(demand_df, staff_df, max_dev):
+    """
+    If optimizer has `build_and_solve_shift_model`, adapt inputs accordingly and call it.
+    Returns a normalized dict if successful, else None.
+    """
     if opt_mod is None or not hasattr(opt_mod, "build_and_solve_shift_model"):
         return None
+
+    # Sets
     W = list(staff_df["name"])
     D = list(range(1, 8))
     T = list(range(1, 16))
+
+    # Shift set: try user's builder or fallback
     if hasattr(opt_mod, "build_shift_set"):
         try:
             S = opt_mod.build_shift_set(T, 4, 8)
@@ -92,16 +100,35 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
             S = build_shift_set_fallback(T, 4, 8)
     else:
         S = build_shift_set_fallback(T, 4, 8)
+
+    # Min/Max hours
     MinHw = {row["name"]: float(row["min_week_hours"]) for _, row in staff_df.iterrows()}
     MaxHw = {row["name"]: float(row["max_week_hours"]) for _, row in staff_df.iterrows()}
+
+    # Demand as dict of lists indexed by day, optimizer expects Demand[d][t-1]
     Demand = {d: [float(x) for x in demand_df.iloc[d-1, :].tolist()] for d in D}
+
+    # Call the user's function WITHOUT time_limit kw
     fn = getattr(opt_mod, "build_and_solve_shift_model")
-    res = fn(W, D, T, S, MinHw, MaxHw, Demand, Max_Deviation=max_dev, time_limit=int(time_limit))
+    try:
+        res = fn(W, D, T, S, MinHw, MaxHw, Demand, Max_Deviation=max_dev)
+    except TypeError:
+        # if user requires time_limit positionally/kw but has a default, omit it; else try None
+        try:
+            res = fn(W, D, T, S, MinHw, MaxHw, Demand, Max_Deviation=max_dev, time_limit=None)
+        except Exception as e:
+            st.error(f"Failed to call build_and_solve_shift_model without a time limit: {e}")
+            st.stop()
+
+    # Normalize to our expected outputs
     out = {}
     out["status"] = res.get("status", "OK")
     out["objective"] = res.get("objective", float("nan"))
     out["elapsed_time"] = res.get("elapsed_time", float("nan"))
+
+    # Convert schedule list[(w,d,t)] to DataFrames
     schedule = res.get("schedule", [])
+    # Coverage by day-slot
     rows = []
     for d in D:
         for t in T:
@@ -111,20 +138,28 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
             over = max(0.0, staffed - demand_val)
             rows.append({"day": d, "slot": t, "demand": demand_val, "staffed": staffed, "under": under, "over": over})
     out["coverage_df"] = pd.DataFrame(rows)
+
+    # Hours per worker (each slot counts as 1 hour)
     hours_rows = []
     for w in W:
         total_hours = sum(1 for (w_, _, _) in schedule if w_ == w)
         hours_rows.append({"name": w, "total_hours": total_hours,
                            "min_week_hours": MinHw[w], "max_week_hours": MaxHw[w]})
     out["hours_df"] = pd.DataFrame(hours_rows)
+
+    # Assignments in slot form; also we will aggregate to per-worker 7x15 later
     out["assignments_df"] = pd.DataFrame([{"name": w, "day": d, "start_slot": t, "end_slot": t, "hours": 1}
                                           for (w, d, t) in schedule])
     return out
 
-def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limit):
+def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation):
+    """
+    Generic fallback call if a different function name is used. No time_limit passed.
+    """
     if opt_module is None:
         debug_import_error()
         st.stop()
+
     candidate_names = ["solve_schedule","schedule","solve","optimize","optimise","run","main"]
     fn = None
     for name in candidate_names:
@@ -135,6 +170,7 @@ def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limi
                  "Either provide `build_and_solve_shift_model` or one of: "
                  + ", ".join(candidate_names))
         st.stop()
+
     sig = inspect.signature(fn)
     params = sig.parameters
     kw = {}
@@ -142,15 +178,18 @@ def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limi
     elif "demand" in params: kw["demand"] = demand_df
     elif "demand_matrix" in params: kw["demand_matrix"] = demand_df
     elif "sales" in params: kw["sales"] = demand_df
+
     if "staff_df" in params: kw["staff_df"] = staff_df
     elif "staff" in params: kw["staff"] = staff_df
+
     if "S" in params: kw["S"] = S
     elif "shifts" in params: kw["shifts"] = S
+
     if "max_deviation" in params: kw["max_deviation"] = max_deviation
     elif "max_dev" in params: kw["max_dev"] = max_deviation
-    if "time_limit" in params: kw["time_limit"] = time_limit
-    elif "timelimit" in params: kw["timelimit"] = time_limit
+
     res = fn(**kw)
+
     if isinstance(res, dict):
         return res
     elif isinstance(res, (list, tuple)):
@@ -173,7 +212,6 @@ DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 with st.sidebar:
     st.header("Configuration")
     max_dev = st.number_input("Max deviation per slot (people)", min_value=0.0, value=2.5, step=0.5)
-    time_limit = st.number_input("Solver time limit (seconds)", min_value=10, value=180, step=10)
 
     st.markdown("---")
     st.subheader("Demand CSV")
@@ -185,7 +223,6 @@ with st.sidebar:
     st.caption("Edit staff below. You can add or delete rows. Download/Upload to reuse.")
     uploaded_staff = st.file_uploader("Upload staff CSV (optional)", type=["csv"], key="staff_csv")
     if "staff_df" not in st.session_state:
-        # Initialize session state with DEFAULT_STAFF
         st.session_state["staff_df"] = pd.DataFrame(DEFAULT_STAFF)
     if uploaded_staff is not None:
         st.session_state["staff_df"] = pd.read_csv(uploaded_staff)
@@ -244,9 +281,9 @@ else:
 st.markdown("### Run Optimizer")
 if st.button("Solve now", type="primary"):
     with st.spinner("Solving..."):
-        res = adapt_to_user_optimizer(demand, st.session_state["staff_df"], max_dev, time_limit)
+        res = adapt_to_user_optimizer(demand, st.session_state["staff_df"], max_dev)
         if res is None:
-            res = call_any_solver(opt_mod, demand, st.session_state["staff_df"], S, max_deviation=max_dev, time_limit=time_limit)
+            res = call_any_solver(opt_mod, demand, st.session_state["staff_df"], S, max_deviation=max_dev)
 
     st.success(f"Status: {res.get('status','N/A')}, Objective (total deviation): {res.get('objective', float('nan')):.4f}")
     if 'hours_df' in res:
