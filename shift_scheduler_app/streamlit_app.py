@@ -123,15 +123,14 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
                                           for (w, d, t) in schedule])
     return out
 
-def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limit, seed):
+def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limit):
     """
-    Previous dynamic fallback when specific adapter is not used.
+    Generic fallback call if a different function name is used.
     """
     if opt_module is None:
         debug_import_error()
         st.stop()
 
-    # find a solver function by common names
     candidate_names = [
         "solve_schedule", "schedule", "solve", "optimize", "optimise", "run", "main"
     ]
@@ -146,8 +145,6 @@ def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limi
                  + ", ".join(candidate_names))
         st.stop()
 
-    # Build kwargs based on signature
-    import inspect
     sig = inspect.signature(fn)
     params = sig.parameters
     kw = {}
@@ -168,17 +165,8 @@ def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limi
     if "time_limit" in params: kw["time_limit"] = time_limit
     elif "timelimit" in params: kw["timelimit"] = time_limit
 
-    if "seed" in params: kw["seed"] = seed
-    elif "random_seed" in params: kw["random_seed"] = seed
+    res = fn(**kw)
 
-    # Try invoke
-    try:
-        res = fn(**kw)
-    except TypeError as e:
-        st.error(f"Failed to call solver function `{fn.__name__}` due to signature mismatch: {e}")
-        st.stop()
-
-    # Normalize
     if isinstance(res, dict):
         return res
     elif isinstance(res, (list, tuple)):
@@ -203,7 +191,6 @@ with st.sidebar:
     st.header("Configuration")
     max_dev = st.number_input("Max deviation per slot (people)", min_value=0.0, value=2.5, step=0.5)
     time_limit = st.number_input("Solver time limit (seconds)", min_value=10, value=180, step=10)
-    seed = st.number_input("Random seed (for reproducibility)", min_value=0, value=42, step=1)
 
     st.markdown("---")
     st.subheader("Demand CSV")
@@ -217,12 +204,7 @@ with st.sidebar:
     if uploaded_staff is not None:
         staff_df_init = pd.read_csv(uploaded_staff)
     else:
-        staff_df_init = pd.DataFrame([
-            {"name":"Ana","min_week_hours":30,"max_week_hours":39,"contract_hours":30,"weekend_only":False},
-            {"name":"Vanessa","min_week_hours":25,"max_week_hours":33,"contract_hours":25,"weekend_only":False},
-            {"name":"Ines","min_week_hours":30,"max_week_hours":39,"contract_hours":30,"weekend_only":False},
-            {"name":"Yuliia","min_week_hours":20,"max_week_hours":26,"contract_hours":20,"weekend_only":False},
-        ])
+        staff_df_init = pd.DataFrame([{'name': 'Ana', 'min_week_hours': 30, 'max_week_hours': 39.0, 'contract_hours': 30, 'weekend_only': False}, {'name': 'Vanessa_M', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Ines', 'min_week_hours': 30, 'max_week_hours': 39.0, 'contract_hours': 30, 'weekend_only': False}, {'name': 'Yuliia', 'min_week_hours': 20, 'max_week_hours': 26.0, 'contract_hours': 20, 'weekend_only': False}, {'name': 'Giulia', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Tomas', 'min_week_hours': 30, 'max_week_hours': 39.0, 'contract_hours': 30, 'weekend_only': False}, {'name': 'Ana_Bernabe', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Raul_Calero', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Jose_Antonio', 'min_week_hours': 20, 'max_week_hours': 26.0, 'contract_hours': 20, 'weekend_only': False}, {'name': 'Haely', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}])
     staff_df = st.data_editor(
         staff_df_init,
         num_rows="dynamic",
@@ -278,7 +260,7 @@ if st.button("Solve now", type="primary"):
         res = adapt_to_user_optimizer(demand, st.session_state["staff_df"], max_dev, time_limit)
         if res is None:
             # Fallback to generic dynamic call
-            res = call_any_solver(opt_mod, demand, st.session_state["staff_df"], S, max_deviation=max_dev, time_limit=time_limit, seed=0)
+            res = call_any_solver(opt_mod, demand, st.session_state["staff_df"], S, max_deviation=max_dev, time_limit=time_limit)
 
     st.success(f"Status: {res.get('status','N/A')}, Objective (total deviation): {res.get('objective', float('nan')):.4f}")
     if 'hours_df' in res:
@@ -300,7 +282,6 @@ if st.button("Solve now", type="primary"):
     DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
     worker_tables = {}
     if not assignments_df.empty:
-        # If assignments_df has single-slot rows (start_slot==end_slot), it still works.
         for w in workers:
             mat = np.zeros((7,15), dtype=int)
             subset = assignments_df[assignments_df['name'] == w]
@@ -313,9 +294,6 @@ if st.button("Solve now", type="primary"):
                 mat[d, s:e+1] = 1
             df = pd.DataFrame(mat, columns=SLOT_LABELS, index=DAY_LABELS)
             worker_tables[w] = df
-    else:
-        # If assignments_df missing, try reconstruct from coverage or raw results if present
-        worker_tables = {}
 
     for w in workers:
         if w in worker_tables:
