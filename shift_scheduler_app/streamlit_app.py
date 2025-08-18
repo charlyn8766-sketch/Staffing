@@ -16,20 +16,30 @@ except Exception as e:
     st.code("pip install numpy")
     st.stop()
 
+import inspect
 from io import BytesIO
-import sys, os, importlib
+import sys, os
 
-# --- Robust import of optimizer ---
+# --- Import optimizer module robustly ---
+opt_mod = None
+opt_import_error = None
 try:
-    from optimizer import solve_schedule, build_shift_set
+    import optimizer as _opt_mod
+    opt_mod = _opt_mod
 except Exception as e1:
     _here = os.path.dirname(__file__)
     if _here and _here not in sys.path:
         sys.path.insert(0, _here)
     try:
-        from optimizer import solve_schedule, build_shift_set
+        import optimizer as _opt_mod
+        opt_mod = _opt_mod
     except Exception as e2:
-        st.error("Failed to import `optimizer.py`. Please ensure it is in the same folder as this file.")
+        opt_import_error = (e1, e2)
+
+def debug_import_error():
+    st.error("Failed to import `optimizer.py`. Please ensure it is in the same folder as this file.")
+    if opt_import_error is not None:
+        e1, e2 = opt_import_error
         st.code(f"""
 Original error 1: {type(e1).__name__}: {e1}
 Retry error     : {type(e2).__name__}: {e2}
@@ -38,10 +48,152 @@ __file__        : {__file__}
 sys.path[0..3]  : {sys.path[:4]}
 Folder contents : {os.listdir(os.path.dirname(__file__)) if os.path.dirname(__file__) else 'N/A'}
         """)
+
+def build_shift_set_fallback(T, min_len=4, max_len=8):
+    S = []
+    for s in T:
+        for e in T:
+            L = e - s + 1
+            if min_len <= L <= max_len:
+                S.append((s,e))
+    return S
+
+def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
+    """
+    If optimizer has `build_and_solve_shift_model`, adapt inputs accordingly and call it.
+    Returns a normalized dict if successful, else None.
+    """
+    if opt_mod is None or not hasattr(opt_mod, "build_and_solve_shift_model"):
+        return None
+
+    # Sets
+    W = list(staff_df["name"])
+    D = list(range(1, 8))
+    T = list(range(1, 16))
+
+    # Shift set: try user's builder or fallback
+    if hasattr(opt_mod, "build_shift_set"):
+        try:
+            S = opt_mod.build_shift_set(T, 4, 8)
+        except Exception:
+            S = build_shift_set_fallback(T, 4, 8)
+    else:
+        S = build_shift_set_fallback(T, 4, 8)
+
+    # Min/Max hours
+    MinHw = {row["name"]: float(row["min_week_hours"]) for _, row in staff_df.iterrows()}
+    MaxHw = {row["name"]: float(row["max_week_hours"]) for _, row in staff_df.iterrows()}
+
+    # Demand as dict of lists indexed by day, optimizer expects Demand[d][t-1]
+    Demand = {d: [float(x) for x in demand_df.iloc[d-1, :].tolist()] for d in D}
+
+    # Call the user's function
+    fn = getattr(opt_mod, "build_and_solve_shift_model")
+    res = fn(W, D, T, S, MinHw, MaxHw, Demand, Max_Deviation=max_dev, time_limit=int(time_limit))
+
+    # Normalize to our expected outputs
+    out = {}
+    out["status"] = res.get("status", "OK")
+    out["objective"] = res.get("objective", float("nan"))
+    out["elapsed_time"] = res.get("elapsed_time", float("nan"))
+
+    # Convert schedule list[(w,d,t)] to DataFrames
+    schedule = res.get("schedule", [])
+    # Coverage by day-slot
+    rows = []
+    for d in D:
+        for t in T:
+            staffed = sum(1 for (w_, d_, t_) in schedule if d_ == d and t_ == t)
+            demand_val = float(demand_df.iloc[d-1, t-1])
+            under = max(0.0, demand_val - staffed)
+            over = max(0.0, staffed - demand_val)
+            rows.append({"day": d, "slot": t, "demand": demand_val, "staffed": staffed, "under": under, "over": over})
+    out["coverage_df"] = pd.DataFrame(rows)
+
+    # Hours per worker (each slot counts as 1 hour)
+    hours_rows = []
+    for w in W:
+        total_hours = sum(1 for (w_, _, _) in schedule if w_ == w)
+        hours_rows.append({"name": w, "total_hours": total_hours,
+                           "min_week_hours": MinHw[w], "max_week_hours": MaxHw[w]})
+    out["hours_df"] = pd.DataFrame(hours_rows)
+
+    # Assignments in slot form; also we will aggregate to per-worker 7x15 later
+    out["assignments_df"] = pd.DataFrame([{"name": w, "day": d, "start_slot": t, "end_slot": t, "hours": 1}
+                                          for (w, d, t) in schedule])
+    return out
+
+def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limit, seed):
+    """
+    Previous dynamic fallback when specific adapter is not used.
+    """
+    if opt_module is None:
+        debug_import_error()
         st.stop()
 
-st.set_page_config(page_title="Shift Scheduler", layout="wide")
+    # find a solver function by common names
+    candidate_names = [
+        "solve_schedule", "schedule", "solve", "optimize", "optimise", "run", "main"
+    ]
+    fn = None
+    for name in candidate_names:
+        if hasattr(opt_module, name) and callable(getattr(opt_module, name)):
+            fn = getattr(opt_module, name)
+            break
+    if fn is None:
+        st.error("No solver function found in optimizer.py. "
+                 "Either provide `build_and_solve_shift_model` or one of: "
+                 + ", ".join(candidate_names))
+        st.stop()
 
+    # Build kwargs based on signature
+    import inspect
+    sig = inspect.signature(fn)
+    params = sig.parameters
+    kw = {}
+    if "demand_df" in params: kw["demand_df"] = demand_df
+    elif "demand" in params: kw["demand"] = demand_df
+    elif "demand_matrix" in params: kw["demand_matrix"] = demand_df
+    elif "sales" in params: kw["sales"] = demand_df
+
+    if "staff_df" in params: kw["staff_df"] = staff_df
+    elif "staff" in params: kw["staff"] = staff_df
+
+    if "S" in params: kw["S"] = S
+    elif "shifts" in params: kw["shifts"] = S
+
+    if "max_deviation" in params: kw["max_deviation"] = max_deviation
+    elif "max_dev" in params: kw["max_dev"] = max_deviation
+
+    if "time_limit" in params: kw["time_limit"] = time_limit
+    elif "timelimit" in params: kw["timelimit"] = time_limit
+
+    if "seed" in params: kw["seed"] = seed
+    elif "random_seed" in params: kw["random_seed"] = seed
+
+    # Try invoke
+    try:
+        res = fn(**kw)
+    except TypeError as e:
+        st.error(f"Failed to call solver function `{fn.__name__}` due to signature mismatch: {e}")
+        st.stop()
+
+    # Normalize
+    if isinstance(res, dict):
+        return res
+    elif isinstance(res, (list, tuple)):
+        labels = ["coverage_df", "hours_df", "assignments_df"]
+        out = {}
+        for i, obj in enumerate(res):
+            key = labels[i] if i < len(labels) else f"out_{i}"
+            out[key] = obj
+        out.setdefault("status", "OK")
+        out.setdefault("objective", float("nan"))
+        return out
+    else:
+        return {"raw_result": res, "status": "OK", "objective": float("nan")}
+
+st.set_page_config(page_title="Shift Scheduler", layout="wide")
 st.title("Shift Scheduler (Streamlit + PuLP)")
 
 SLOT_LABELS = ["10-11","11-12","12-13","13-14","14-15","15-16","16-17","17-18","18-19","19-20","20-21","21-22","22-23","23-00","00-01"]
@@ -109,25 +261,24 @@ if demand.shape != (7,15):
     st.error(f"Demand CSV must be 7 rows x 15 columns. Current shape: {demand.shape}")
     st.stop()
 
-# Build shift set
+# Build shift set for fallback path
 T = list(range(1,16))
-try:
-    S = build_shift_set(T, min_len=4, max_len=8)
-except Exception:
-    S = []
-    for s in T:
-        for e in T:
-            L = e - s + 1
-            if 4 <= L <= 8:
-                S.append((s,e))
+if opt_mod is not None and hasattr(opt_mod, "build_shift_set"):
+    try:
+        S = opt_mod.build_shift_set(T, 4, 8)
+    except Exception:
+        S = build_shift_set_fallback(T, 4, 8)
+else:
+    S = build_shift_set_fallback(T, 4, 8)
 
 st.markdown("### Run Optimizer")
 if st.button("Solve now", type="primary"):
     with st.spinner("Solving..."):
-        try:
-            res = solve_schedule(demand, st.session_state["staff_df"], S=S, max_deviation=max_dev, time_limit=time_limit, seed=seed)
-        except TypeError:
-            res = solve_schedule(demand, st.session_state["staff_df"], S=S, max_deviation=max_dev, time_limit=time_limit)
+        # First try the user's specific function if available
+        res = adapt_to_user_optimizer(demand, st.session_state["staff_df"], max_dev, time_limit)
+        if res is None:
+            # Fallback to generic dynamic call
+            res = call_any_solver(opt_mod, demand, st.session_state["staff_df"], S, max_deviation=max_dev, time_limit=time_limit, seed=0)
 
     st.success(f"Status: {res.get('status','N/A')}, Objective (total deviation): {res.get('objective', float('nan')):.4f}")
     if 'hours_df' in res:
@@ -145,24 +296,33 @@ if st.button("Solve now", type="primary"):
     def style_schedule(df):
         return df.style.apply(lambda s: ['background-color: #C6F6D5' if v==1 else '' for v in s], axis=1)
 
+    SLOT_LABELS = ["10-11","11-12","12-13","13-14","14-15","15-16","16-17","17-18","18-19","19-20","20-21","21-22","22-23","23-00","00-01"]
+    DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
     worker_tables = {}
-    for w in workers:
-        mat = np.zeros((7,15), dtype=int)
-        subset = assignments_df[assignments_df['name'] == w]
-        for _, row in subset.iterrows():
-            d = int(row['day']) - 1
-            s = int(row['start_slot']) - 1
-            e = int(row['end_slot']) - 1
-            s = max(0, min(14, s))
-            e = max(0, min(14, e))
-            mat[d, s:e+1] = 1
-        df = pd.DataFrame(mat, columns=SLOT_LABELS, index=DAY_LABELS)
-        worker_tables[w] = df
+    if not assignments_df.empty:
+        # If assignments_df has single-slot rows (start_slot==end_slot), it still works.
+        for w in workers:
+            mat = np.zeros((7,15), dtype=int)
+            subset = assignments_df[assignments_df['name'] == w]
+            for _, row in subset.iterrows():
+                d = int(row['day']) - 1
+                s = int(row['start_slot']) - 1
+                e = int(row['end_slot']) - 1
+                s = max(0, min(14, s))
+                e = max(0, min(14, e))
+                mat[d, s:e+1] = 1
+            df = pd.DataFrame(mat, columns=SLOT_LABELS, index=DAY_LABELS)
+            worker_tables[w] = df
+    else:
+        # If assignments_df missing, try reconstruct from coverage or raw results if present
+        worker_tables = {}
 
     for w in workers:
-        with st.expander(f"{w}"):
-            st.dataframe(style_schedule(worker_tables[w]), use_container_width=True)
+        if w in worker_tables:
+            with st.expander(f"{w}"):
+                st.dataframe(style_schedule(worker_tables[w]), use_container_width=True)
 
+    # Download per-worker Excel
     if worker_tables:
         try:
             import xlsxwriter
