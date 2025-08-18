@@ -19,6 +19,27 @@ except Exception as e:
 import inspect
 from io import BytesIO
 import sys, os
+import math
+
+# ------------------ Defaults ------------------
+DEFAULT_STAFF = [
+    {"name":"Ana",           "min_week_hours":30},
+    {"name":"Vanessa_M",    "min_week_hours":25},
+    {"name":"Ines",         "min_week_hours":30},
+    {"name":"Yuliia",       "min_week_hours":20},
+    {"name":"Giulia",       "min_week_hours":25},
+    {"name":"Tomas",        "min_week_hours":30},
+    {"name":"Ana_Bernabe",  "min_week_hours":25},
+    {"name":"Raul_Calero",  "min_week_hours":25},
+    {"name":"Jose_Antonio", "min_week_hours":20},
+    {"name":"Haely",        "min_week_hours":25},
+]
+def _round_half(x): return math.floor(x*2+0.5)/2.0
+for r in DEFAULT_STAFF:
+    min_h = r["min_week_hours"]
+    r["max_week_hours"] = _round_half(min(40.0, min_h*1.3))
+    r["contract_hours"] = min_h
+    r["weekend_only"] = False
 
 # --- Import optimizer module robustly ---
 opt_mod = None
@@ -59,19 +80,11 @@ def build_shift_set_fallback(T, min_len=4, max_len=8):
     return S
 
 def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
-    """
-    If optimizer has `build_and_solve_shift_model`, adapt inputs accordingly and call it.
-    Returns a normalized dict if successful, else None.
-    """
     if opt_mod is None or not hasattr(opt_mod, "build_and_solve_shift_model"):
         return None
-
-    # Sets
     W = list(staff_df["name"])
     D = list(range(1, 8))
     T = list(range(1, 16))
-
-    # Shift set: try user's builder or fallback
     if hasattr(opt_mod, "build_shift_set"):
         try:
             S = opt_mod.build_shift_set(T, 4, 8)
@@ -79,27 +92,16 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
             S = build_shift_set_fallback(T, 4, 8)
     else:
         S = build_shift_set_fallback(T, 4, 8)
-
-    # Min/Max hours
     MinHw = {row["name"]: float(row["min_week_hours"]) for _, row in staff_df.iterrows()}
     MaxHw = {row["name"]: float(row["max_week_hours"]) for _, row in staff_df.iterrows()}
-
-    # Demand as dict of lists indexed by day, optimizer expects Demand[d][t-1]
     Demand = {d: [float(x) for x in demand_df.iloc[d-1, :].tolist()] for d in D}
-
-    # Call the user's function
     fn = getattr(opt_mod, "build_and_solve_shift_model")
     res = fn(W, D, T, S, MinHw, MaxHw, Demand, Max_Deviation=max_dev, time_limit=int(time_limit))
-
-    # Normalize to our expected outputs
     out = {}
     out["status"] = res.get("status", "OK")
     out["objective"] = res.get("objective", float("nan"))
     out["elapsed_time"] = res.get("elapsed_time", float("nan"))
-
-    # Convert schedule list[(w,d,t)] to DataFrames
     schedule = res.get("schedule", [])
-    # Coverage by day-slot
     rows = []
     for d in D:
         for t in T:
@@ -109,42 +111,30 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev, time_limit):
             over = max(0.0, staffed - demand_val)
             rows.append({"day": d, "slot": t, "demand": demand_val, "staffed": staffed, "under": under, "over": over})
     out["coverage_df"] = pd.DataFrame(rows)
-
-    # Hours per worker (each slot counts as 1 hour)
     hours_rows = []
     for w in W:
         total_hours = sum(1 for (w_, _, _) in schedule if w_ == w)
         hours_rows.append({"name": w, "total_hours": total_hours,
                            "min_week_hours": MinHw[w], "max_week_hours": MaxHw[w]})
     out["hours_df"] = pd.DataFrame(hours_rows)
-
-    # Assignments in slot form; also we will aggregate to per-worker 7x15 later
     out["assignments_df"] = pd.DataFrame([{"name": w, "day": d, "start_slot": t, "end_slot": t, "hours": 1}
                                           for (w, d, t) in schedule])
     return out
 
 def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limit):
-    """
-    Generic fallback call if a different function name is used.
-    """
     if opt_module is None:
         debug_import_error()
         st.stop()
-
-    candidate_names = [
-        "solve_schedule", "schedule", "solve", "optimize", "optimise", "run", "main"
-    ]
+    candidate_names = ["solve_schedule","schedule","solve","optimize","optimise","run","main"]
     fn = None
     for name in candidate_names:
         if hasattr(opt_module, name) and callable(getattr(opt_module, name)):
-            fn = getattr(opt_module, name)
-            break
+            fn = getattr(opt_module, name); break
     if fn is None:
         st.error("No solver function found in optimizer.py. "
                  "Either provide `build_and_solve_shift_model` or one of: "
                  + ", ".join(candidate_names))
         st.stop()
-
     sig = inspect.signature(fn)
     params = sig.parameters
     kw = {}
@@ -152,34 +142,27 @@ def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation, time_limi
     elif "demand" in params: kw["demand"] = demand_df
     elif "demand_matrix" in params: kw["demand_matrix"] = demand_df
     elif "sales" in params: kw["sales"] = demand_df
-
     if "staff_df" in params: kw["staff_df"] = staff_df
     elif "staff" in params: kw["staff"] = staff_df
-
     if "S" in params: kw["S"] = S
     elif "shifts" in params: kw["shifts"] = S
-
     if "max_deviation" in params: kw["max_deviation"] = max_deviation
     elif "max_dev" in params: kw["max_dev"] = max_deviation
-
     if "time_limit" in params: kw["time_limit"] = time_limit
     elif "timelimit" in params: kw["timelimit"] = time_limit
-
     res = fn(**kw)
-
     if isinstance(res, dict):
         return res
     elif isinstance(res, (list, tuple)):
-        labels = ["coverage_df", "hours_df", "assignments_df"]
+        labels = ["coverage_df","hours_df","assignments_df"]
         out = {}
-        for i, obj in enumerate(res):
+        for i,obj in enumerate(res):
             key = labels[i] if i < len(labels) else f"out_{i}"
             out[key] = obj
-        out.setdefault("status", "OK")
-        out.setdefault("objective", float("nan"))
+        out.setdefault("status","OK"); out.setdefault("objective", float("nan"))
         return out
     else:
-        return {"raw_result": res, "status": "OK", "objective": float("nan")}
+        return {"raw_result": res, "status":"OK", "objective": float("nan")}
 
 st.set_page_config(page_title="Shift Scheduler", layout="wide")
 st.title("Shift Scheduler (Streamlit + PuLP)")
@@ -201,12 +184,16 @@ with st.sidebar:
     st.subheader("Staff table")
     st.caption("Edit staff below. You can add or delete rows. Download/Upload to reuse.")
     uploaded_staff = st.file_uploader("Upload staff CSV (optional)", type=["csv"], key="staff_csv")
+    if "staff_df" not in st.session_state:
+        # Initialize session state with DEFAULT_STAFF
+        st.session_state["staff_df"] = pd.DataFrame(DEFAULT_STAFF)
     if uploaded_staff is not None:
-        staff_df_init = pd.read_csv(uploaded_staff)
-    else:
-        staff_df_init = pd.DataFrame([{'name': 'Ana', 'min_week_hours': 30, 'max_week_hours': 39.0, 'contract_hours': 30, 'weekend_only': False}, {'name': 'Vanessa_M', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Ines', 'min_week_hours': 30, 'max_week_hours': 39.0, 'contract_hours': 30, 'weekend_only': False}, {'name': 'Yuliia', 'min_week_hours': 20, 'max_week_hours': 26.0, 'contract_hours': 20, 'weekend_only': False}, {'name': 'Giulia', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Tomas', 'min_week_hours': 30, 'max_week_hours': 39.0, 'contract_hours': 30, 'weekend_only': False}, {'name': 'Ana_Bernabe', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Raul_Calero', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}, {'name': 'Jose_Antonio', 'min_week_hours': 20, 'max_week_hours': 26.0, 'contract_hours': 20, 'weekend_only': False}, {'name': 'Haely', 'min_week_hours': 25, 'max_week_hours': 32.5, 'contract_hours': 25, 'weekend_only': False}])
+        st.session_state["staff_df"] = pd.read_csv(uploaded_staff)
+    if st.button("Load default staff (10)"):
+        st.session_state["staff_df"] = pd.DataFrame(DEFAULT_STAFF)
+
     staff_df = st.data_editor(
-        staff_df_init,
+        st.session_state["staff_df"],
         num_rows="dynamic",
         use_container_width=True,
         column_config={
@@ -219,6 +206,7 @@ with st.sidebar:
         hide_index=True
     )
     st.session_state["staff_df"] = staff_df
+    st.caption(f"Current staff count: **{len(staff_df)}**")
 
     staff_csv = staff_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download staff CSV", staff_csv, file_name="staff.csv", mime="text/csv")
@@ -256,10 +244,8 @@ else:
 st.markdown("### Run Optimizer")
 if st.button("Solve now", type="primary"):
     with st.spinner("Solving..."):
-        # First try the user's specific function if available
         res = adapt_to_user_optimizer(demand, st.session_state["staff_df"], max_dev, time_limit)
         if res is None:
-            # Fallback to generic dynamic call
             res = call_any_solver(opt_mod, demand, st.session_state["staff_df"], S, max_deviation=max_dev, time_limit=time_limit)
 
     st.success(f"Status: {res.get('status','N/A')}, Objective (total deviation): {res.get('objective', float('nan')):.4f}")
