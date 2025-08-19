@@ -68,7 +68,7 @@ default_demand = {
 if demand_file is not None:
     demand_df = pd.read_csv(demand_file, header=None)
     if demand_df.shape != (7,13):
-        st.error(f"Demand CSV must be 7 rows x 13 columns. Got {{demand_df.shape}}.")
+        st.error(f"Demand CSV must be 7 rows x 13 columns. Got {demand_df.shape}.")
         st.stop()
 else:
     demand_df = pd.DataFrame([default_demand[d] for d in D])
@@ -84,7 +84,7 @@ W = [str(w) for w in staff_df["name"].tolist()]
 
 if st.button("Solve", type="primary"):
     with st.spinner("Solving..."):
-        Demand = {{d: list(map(float, demand_df.iloc[d-1].tolist())) for d in D}}
+        Demand = {d: list(map(float, demand_df.iloc[d-1].tolist())) for d in D}
         status, obj, schedule, metrics = solve_schedule(
             W=W, D=D, T=T,
             MinHw=MinHw, MaxHw=MaxHw,
@@ -93,7 +93,7 @@ if st.button("Solve", type="primary"):
             require_min_staff=ensure_min_staff,
         )
 
-    st.success(f"Status: {{status}}; Total deviation: {{obj:.4f}}")
+    st.success(f"Status: {status}; Total deviation: {obj:.4f}")
 
     # Schedule table
     sched_df = pd.DataFrame(schedule, columns=["worker","day","slot"]).sort_values(["day","slot","worker"])
@@ -102,7 +102,7 @@ if st.button("Solve", type="primary"):
     # Coverage table
     rows = []
     for (d,t),(u,o,staffed,dem) in metrics.items():
-        rows.append({{"day":d,"slot":t,"staffed":staffed,"demand":dem,"under":u,"over":o}})
+        rows.append({"day":d,"slot":t,"staffed":staffed,"demand":dem,"under":u,"over":o})
     cov_df = pd.DataFrame(rows).sort_values(["day","slot"])
     st.dataframe(cov_df, use_container_width=True)
 
@@ -117,7 +117,7 @@ if st.button("Solve", type="primary"):
     workers = [str(w) for w in staff_df["name"].tolist()]
     def style_schedule(df):
         return df.style.apply(lambda s: ['background-color: #C6F6D5' if v==1 else '' for v in s], axis=1)
-    worker_tables = {{}}
+    worker_tables = {}
     if not sched_df.empty:
         import numpy as np
         for w in workers:
