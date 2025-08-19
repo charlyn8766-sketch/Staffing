@@ -23,7 +23,7 @@ SLOT_LABELS = ["12-13","13-14","14-15","15-16","16-17","17-18","18-19","19-20","
 DEFAULT_STAFF = [
     {"name":"Cristina_Mata",    "min_week_hours":25.0, "max_week_hours":32.5},
     {"name":"Gabriela_Velasco", "min_week_hours":20.0, "max_week_hours":26.0},
-    {"name":"Javi",             "min_week_hours":27.5},
+    {"name":"Javi",             "min_week_hours":27, "max_week_hours":27.5},
     {"name":"Lorena",           "min_week_hours":25.0, "max_week_hours":32.5},
     {"name":"Aurora",           "min_week_hours":25.0, "max_week_hours":32.5},
     {"name":"Clara_Nogales",    "min_week_hours":25.0, "max_week_hours":32.5},
