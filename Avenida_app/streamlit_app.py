@@ -17,7 +17,7 @@ st.title("Avenida Shift Scheduler (12:00–24:00)")
 # Sets
 D = list(range(1,8))
 T = list(range(1,14))  # 13 slots
-SLOT_LABELS = ["12-13","13-14","14-15","15-16","16-17","17-18","18-19","19-20","20-21","21-22","22-23","23-24","24-01?"]
+SLOT_LABELS = ["12-13","13-14","14-15","15-16","16-17","17-18","18-19","19-20","20-21","21-22","22-23","23-00","00-01"]
 
 # Default staff
 DEFAULT_STAFF = [
@@ -111,6 +111,31 @@ if st.button("Solve", type="primary"):
                        file_name="avenida_schedule.csv", mime="text/csv")
     st.download_button("Download coverage CSV", cov_df.to_csv(index=False).encode("utf-8"),
                        file_name="avenida_coverage.csv", mime="text/csv")
+
+
+    # --- Per-worker 7x13 tables (same style as before) ---
+    st.markdown("### Per-worker Schedule (7×13, color = scheduled)")
+    workers = [str(w) for w in staff_df["name"].tolist()]
+    import numpy as np
+    def style_schedule(df):
+        return df.style.apply(lambda s: ['background-color: #C6F6D5' if v==1 else '' for v in s], axis=1)
+    worker_tables = {}
+    if not sched_df.empty:
+        for w in workers:
+            mat = np.zeros((7,13), dtype=int)
+            sub = sched_df[sched_df["worker"] == w]
+            for _, r in sub.iterrows():
+                d = int(r["day"]) - 1
+                t = int(r["slot"]) - 1
+                if 0 <= d < 7 and 0 <= t < 13:
+                    mat[d, t] = 1
+            idx = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+            dfw = pd.DataFrame(mat, columns=SLOT_LABELS, index=idx)
+            worker_tables[w] = dfw
+    for w in workers:
+        if w in worker_tables:
+            with st.expander(w):
+                st.dataframe(style_schedule(worker_tables[w]), use_container_width=True)
 
 # Template download (7x13, no header)
 templ = pd.DataFrame([default_demand[d] for d in D])
