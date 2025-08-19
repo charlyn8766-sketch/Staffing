@@ -115,6 +115,6 @@ if st.button("Solve", type="primary"):
 # Template download (7x13, no header)
 templ = pd.DataFrame([default_demand[d] for d in D])
 st.download_button("Download demand template (7x13 CSV, no header)",
-                   templ.to_csv(index=False, header=False, index=False).encode("utf-8"),
+                   templ.to_csv(index=False, header=False).encode("utf-8"),
                    file_name="sales_demand_template.csv",
                    mime="text/csv")
