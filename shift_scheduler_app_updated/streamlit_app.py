@@ -338,7 +338,7 @@ if st.button("Solve now", type="primary"):
     workers = list(st.session_state["staff_df"]['name'])
 
     def style_schedule(df):
-        return df.style.apply(lambda s: ['background-color: #C6F6D5' if v==1 else '' for v in s], axis=1)
+        return df.style.apply(lambda s: ['background-color: #E6F4FF' if v==1 else '' for v in s], axis=1)
 
     worker_tables = {}
     if not assignments_df.empty:
